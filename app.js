@@ -3629,14 +3629,6 @@ const WordsView = {
 
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-md); gap: var(--space-xs); flex-wrap: wrap;">
         <span class="text-muted">${filtered.length} Vokabeln</span>
-        <div style="display: flex; gap: var(--space-xs);">
-          <button class="btn btn-primary" onclick="WordsView.showAddModal('Eigene Wörter')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 5l0 14" /><path d="M5 12l14 0" />
-            </svg>
-            Eigenes Wort
-          </button>
-        </div>
       </div>
 
       ${filtered.length > 0 ? `
