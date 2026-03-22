@@ -4619,10 +4619,406 @@ async function initApp() {
   }
 }
 
-// App starten wenn DOM geladen
-document.addEventListener('DOMContentLoaded', initApp);
+// ============================================
+// MOBILE TOUCH OPTIMIZATION SYSTEM
+// ============================================
 
-// Double-tap zoom prevention handled via CSS touch-action: manipulation
+const TouchSystem = {
+  // Haptic feedback via Vibration API
+  haptic(type = 'light') {
+    if (!navigator.vibrate) return;
+    switch (type) {
+      case 'light': navigator.vibrate(10); break;
+      case 'medium': navigator.vibrate(20); break;
+      case 'heavy': navigator.vibrate([30, 10, 30]); break;
+      case 'success': navigator.vibrate([10, 50, 20]); break;
+      case 'error': navigator.vibrate([40, 30, 40]); break;
+    }
+  },
+
+  // Ripple effect on touch
+  createRipple(event, element) {
+    const existingRipples = element.querySelectorAll('.ripple-container');
+    existingRipples.forEach(r => r.remove());
+
+    const container = document.createElement('div');
+    container.className = 'ripple-container';
+
+    const ripple = document.createElement('span');
+    ripple.className = 'ripple';
+
+    const rect = element.getBoundingClientRect();
+    const size = Math.max(rect.width, rect.height) * 2;
+
+    let x, y;
+    if (event.touches && event.touches[0]) {
+      x = event.touches[0].clientX - rect.left;
+      y = event.touches[0].clientY - rect.top;
+    } else {
+      x = event.clientX - rect.left;
+      y = event.clientY - rect.top;
+    }
+
+    ripple.style.width = ripple.style.height = size + 'px';
+    ripple.style.left = (x - size / 2) + 'px';
+    ripple.style.top = (y - size / 2) + 'px';
+
+    container.appendChild(ripple);
+    element.appendChild(container);
+
+    setTimeout(() => container.remove(), 600);
+  },
+
+  // Initialize ripple effects on interactive elements
+  initRipples() {
+    const handleRipple = (e) => {
+      const target = e.target.closest('.btn, .mc-option, .mode-card, .session-mode-btn, .nav-item, .filter-chip, .action-button, .continue-action, .fab');
+      if (target) {
+        this.createRipple(e, target);
+        this.haptic('light');
+      }
+    };
+
+    document.addEventListener('pointerdown', handleRipple, { passive: true });
+  },
+
+  // Answer feedback overlay
+  showAnswerFeedback(isCorrect) {
+    const overlay = document.createElement('div');
+    overlay.className = `answer-feedback-overlay ${isCorrect ? 'correct' : 'incorrect'}`;
+    overlay.innerHTML = `
+      <div class="answer-feedback-icon ${isCorrect ? 'correct' : 'incorrect'}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          ${isCorrect
+            ? '<path d="M20 6L9 17l-5-5"/>'
+            : '<path d="M18 6L6 18M6 6l12 12"/>'}
+        </svg>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    this.haptic(isCorrect ? 'success' : 'error');
+    setTimeout(() => overlay.remove(), 600);
+  },
+
+  // FAB visibility management
+  updateFAB() {
+    const fab = document.getElementById('fab-add');
+    if (!fab) return;
+    const showOnViews = ['home', 'words'];
+    if (showOnViews.includes(state.currentView)) {
+      fab.classList.remove('hidden');
+    } else {
+      fab.classList.add('hidden');
+    }
+  },
+
+  // Initialize all touch systems
+  init() {
+    this.initRipples();
+    this.initSwipeNavigation();
+  },
+
+  // Swipe between views
+  initSwipeNavigation() {
+    let startX = 0;
+    let startY = 0;
+    let isDragging = false;
+    const viewOrder = ['home', 'learn', 'words', 'stats', 'settings'];
+
+    const main = document.querySelector('.app-main');
+    if (!main) return;
+
+    main.addEventListener('touchstart', (e) => {
+      // Don't interfere with flashcard swipes or inputs
+      if (e.target.closest('.swipe-card, .flashcard, input, textarea, select, .modal')) return;
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      isDragging = true;
+    }, { passive: true });
+
+    main.addEventListener('touchend', (e) => {
+      if (!isDragging) return;
+      isDragging = false;
+      const endX = e.changedTouches[0].clientX;
+      const endY = e.changedTouches[0].clientY;
+      const diffX = endX - startX;
+      const diffY = endY - startY;
+
+      // Only trigger if horizontal swipe is dominant and > 80px
+      if (Math.abs(diffX) < 80 || Math.abs(diffY) > Math.abs(diffX) * 0.7) return;
+
+      const currentIdx = viewOrder.indexOf(state.currentView);
+      if (currentIdx === -1) return;
+
+      if (diffX < 0 && currentIdx < viewOrder.length - 1) {
+        // Swipe left -> next view
+        Views.show(viewOrder[currentIdx + 1]);
+        this.haptic('light');
+      } else if (diffX > 0 && currentIdx > 0) {
+        // Swipe right -> prev view
+        Views.show(viewOrder[currentIdx - 1]);
+        this.haptic('light');
+      }
+    }, { passive: true });
+  }
+};
+
+// ============================================
+// SWIPE LEARNING FOR FLASHCARDS
+// ============================================
+
+const SwipeLearn = {
+  startX: 0,
+  startY: 0,
+  currentX: 0,
+  isDragging: false,
+  card: null,
+  threshold: 80,
+
+  init(cardElement) {
+    this.card = cardElement;
+    if (!this.card) return;
+
+    this.card.addEventListener('touchstart', this.onTouchStart.bind(this), { passive: true });
+    this.card.addEventListener('touchmove', this.onTouchMove.bind(this), { passive: false });
+    this.card.addEventListener('touchend', this.onTouchEnd.bind(this), { passive: true });
+
+    // Mouse support for desktop
+    this.card.addEventListener('mousedown', this.onMouseDown.bind(this));
+  },
+
+  onTouchStart(e) {
+    // Only enable swipe after card is flipped
+    const flashcard = this.card.querySelector('.flashcard');
+    if (flashcard && !flashcard.classList.contains('flipped')) return;
+
+    this.startX = e.touches[0].clientX;
+    this.startY = e.touches[0].clientY;
+    this.isDragging = true;
+    this.card.style.transition = 'none';
+  },
+
+  onTouchMove(e) {
+    if (!this.isDragging) return;
+
+    const x = e.touches[0].clientX;
+    const y = e.touches[0].clientY;
+    const diffX = x - this.startX;
+    const diffY = y - this.startY;
+
+    // If vertical scroll is dominant, don't swipe
+    if (Math.abs(diffY) > Math.abs(diffX) && Math.abs(diffX) < 20) return;
+
+    // Prevent vertical scroll while swiping
+    if (Math.abs(diffX) > 10) e.preventDefault();
+
+    this.currentX = diffX;
+    const rotation = diffX * 0.08;
+    this.card.style.transform = `translateX(${diffX}px) rotate(${rotation}deg)`;
+
+    // Update swipe indicators
+    const leftIndicator = document.querySelector('.swipe-indicator.left');
+    const rightIndicator = document.querySelector('.swipe-indicator.right');
+    const leftOverlay = document.querySelector('.swipe-overlay.left');
+    const rightOverlay = document.querySelector('.swipe-overlay.right');
+
+    if (leftIndicator && rightIndicator) {
+      const progress = Math.min(Math.abs(diffX) / this.threshold, 1);
+      if (diffX < -20) {
+        leftIndicator.classList.add('active');
+        rightIndicator.classList.remove('active');
+        if (leftOverlay) leftOverlay.style.opacity = progress;
+        if (rightOverlay) rightOverlay.style.opacity = 0;
+      } else if (diffX > 20) {
+        rightIndicator.classList.add('active');
+        leftIndicator.classList.remove('active');
+        if (rightOverlay) rightOverlay.style.opacity = progress;
+        if (leftOverlay) leftOverlay.style.opacity = 0;
+      } else {
+        leftIndicator.classList.remove('active');
+        rightIndicator.classList.remove('active');
+        if (leftOverlay) leftOverlay.style.opacity = 0;
+        if (rightOverlay) rightOverlay.style.opacity = 0;
+      }
+    }
+  },
+
+  onTouchEnd() {
+    if (!this.isDragging) return;
+    this.isDragging = false;
+
+    this.card.classList.add('animating');
+
+    if (this.currentX < -this.threshold) {
+      // Swiped left = wrong
+      this.card.classList.add('swiped-left');
+      TouchSystem.haptic('error');
+      TouchSystem.showAnswerFeedback(false);
+      setTimeout(() => LearnView.answer(false), 400);
+    } else if (this.currentX > this.threshold) {
+      // Swiped right = correct
+      this.card.classList.add('swiped-right');
+      TouchSystem.haptic('success');
+      TouchSystem.showAnswerFeedback(true);
+      setTimeout(() => LearnView.answer(true), 400);
+    } else {
+      // Return to center
+      this.card.style.transform = '';
+      this.card.classList.remove('animating');
+    }
+
+    this.currentX = 0;
+
+    // Reset indicators
+    const indicators = document.querySelectorAll('.swipe-indicator');
+    indicators.forEach(i => i.classList.remove('active'));
+    const overlays = document.querySelectorAll('.swipe-overlay');
+    overlays.forEach(o => o.style.opacity = 0);
+  },
+
+  onMouseDown(e) {
+    const flashcard = this.card.querySelector('.flashcard');
+    if (flashcard && !flashcard.classList.contains('flipped')) return;
+
+    this.startX = e.clientX;
+    this.isDragging = true;
+    this.card.style.transition = 'none';
+
+    const onMouseMove = (e) => {
+      if (!this.isDragging) return;
+      const diffX = e.clientX - this.startX;
+      this.currentX = diffX;
+      const rotation = diffX * 0.08;
+      this.card.style.transform = `translateX(${diffX}px) rotate(${rotation}deg)`;
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      this.onTouchEnd();
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }
+};
+
+// ============================================
+// PATCH EXISTING FUNCTIONS FOR TOUCH
+// ============================================
+
+// Patch Views.show to update FAB and add haptic
+const originalViewsShow = Views.show.bind(Views);
+Views.show = function(viewName) {
+  originalViewsShow(viewName);
+  TouchSystem.updateFAB();
+};
+
+// Patch LearnView.renderFlashcard to add swipe support
+const originalRenderFlashcard = LearnView.renderFlashcard.bind(LearnView);
+LearnView.renderFlashcard = function(container, card) {
+  originalRenderFlashcard(container, card);
+
+  // Wrap flashcard container for swipe
+  const flashcardContainer = container.querySelector('.flashcard-container');
+  if (flashcardContainer) {
+    // Add swipe indicators
+    const indicatorsHtml = `
+      <div class="swipe-indicators">
+        <span class="swipe-indicator left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          Falsch
+        </span>
+        <span class="swipe-hint-text">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          Wischen
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="transform: scaleX(-1)"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </span>
+        <span class="swipe-indicator right">
+          Richtig
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="16" height="16"><path d="M20 6L9 17l-5-5"/></svg>
+        </span>
+      </div>
+    `;
+
+    // Add swipe wrapper
+    const wrapper = document.createElement('div');
+    wrapper.className = 'swipe-card-wrapper';
+
+    // Add overlays
+    wrapper.innerHTML = `
+      <div class="swipe-overlay left">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </div>
+      <div class="swipe-overlay right">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>
+      </div>
+    `;
+
+    flashcardContainer.classList.add('swipe-card');
+    wrapper.appendChild(flashcardContainer);
+    container.prepend(wrapper);
+
+    // Insert indicators after wrapper
+    wrapper.insertAdjacentHTML('afterend', indicatorsHtml);
+
+    // Remove the old "tap to flip" text
+    const tapHint = container.querySelector('.text-center.text-muted.mb-md');
+    if (tapHint && tapHint.textContent.includes('Tippe auf die Karte')) {
+      tapHint.textContent = 'Tippe zum Umdrehen, dann wische';
+    }
+
+    // Initialize swipe on the wrapper
+    SwipeLearn.init(wrapper);
+  }
+};
+
+// Patch answer methods to add feedback
+const originalCheckMCAnswer = LearnView.checkMCAnswer.bind(LearnView);
+LearnView.checkMCAnswer = function(button, correct) {
+  const selected = button.dataset.answer;
+  const isCorrect = this.compareAnswers(selected, correct);
+  TouchSystem.showAnswerFeedback(isCorrect);
+  TouchSystem.haptic(isCorrect ? 'success' : 'error');
+  originalCheckMCAnswer(button, correct);
+};
+
+const originalCheckTypingAnswer = LearnView.checkTypingAnswer.bind(LearnView);
+LearnView.checkTypingAnswer = function(correct) {
+  const input = document.getElementById('typing-answer');
+  if (input) {
+    const isCorrect = this.compareAnswers(input.value.trim(), correct);
+    TouchSystem.showAnswerFeedback(isCorrect);
+    TouchSystem.haptic(isCorrect ? 'success' : 'error');
+  }
+  originalCheckTypingAnswer(correct);
+};
+
+const originalCheckDictationAnswer = LearnView.checkDictationAnswer.bind(LearnView);
+LearnView.checkDictationAnswer = function(correct) {
+  const input = document.getElementById('dictation-answer');
+  if (input) {
+    const isCorrect = this.compareAnswers(input.value.trim(), correct);
+    TouchSystem.showAnswerFeedback(isCorrect);
+    TouchSystem.haptic(isCorrect ? 'success' : 'error');
+  }
+  originalCheckDictationAnswer(correct);
+};
+
+// Patch flipCard for haptic
+const originalFlipCard = LearnView.flipCard.bind(LearnView);
+LearnView.flipCard = function() {
+  TouchSystem.haptic('medium');
+  originalFlipCard();
+};
+
+// App starten wenn DOM geladen
+document.addEventListener('DOMContentLoaded', () => {
+  initApp().then(() => {
+    TouchSystem.init();
+    TouchSystem.updateFAB();
+  });
+});
 
 // Keyboard shortcut for accessibility
 document.addEventListener('keydown', (e) => {
